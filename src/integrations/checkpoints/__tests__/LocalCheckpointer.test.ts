@@ -14,16 +14,17 @@ describe("LocalCheckpointer", () => {
 	let git: SimpleGit
 	let testFile: string
 	let initialCommit: CommitResult
+	const mainBranch = "my_branch"
+	const hiddenBranch = "checkpoints"
 
 	beforeEach(async () => {
 		// Create a temporary directory for testing.
 		tempDir = path.join(os.tmpdir(), `checkpointer-test-${Date.now()}`)
 		await fs.mkdir(tempDir)
-		console.log(tempDir)
 
 		// Initialize git repo.
 		git = simpleGit(tempDir)
-		await git.init()
+		await git.init(["--initial-branch", mainBranch])
 		await git.addConfig("user.name", "Roo Code")
 		await git.addConfig("user.email", "support@roo.vet")
 
@@ -36,11 +37,7 @@ describe("LocalCheckpointer", () => {
 		initialCommit = await git.commit("Initial commit")!
 
 		// Create checkpointer instance.
-		checkpointer = await LocalCheckpointer.create({
-			workspacePath: tempDir,
-			mainBranch: "main",
-			hiddenBranch: "checkpoints",
-		})
+		checkpointer = await LocalCheckpointer.create({ workspacePath: tempDir, mainBranch, hiddenBranch })
 	})
 
 	afterEach(async () => {
@@ -49,8 +46,9 @@ describe("LocalCheckpointer", () => {
 	})
 
 	it("creates a hidden branch on initialization", async () => {
-		const branches = await git.branch()
-		expect(branches.all).toContain("checkpoints")
+		const { all: branches } = await git.branch()
+		expect(branches).toContain(mainBranch)
+		expect(branches).toContain(hiddenBranch)
 	})
 
 	it("saves and lists checkpoints", async () => {
@@ -61,7 +59,7 @@ describe("LocalCheckpointer", () => {
 		expect(commit?.commit).toBeTruthy()
 
 		const checkpoints = await checkpointer.listCheckpoints()
-		expect(checkpoints.length).toBeGreaterThan(0)
+		expect(checkpoints.length).toBe(2)
 		expect(checkpoints[0].message).toBe(commitMessage)
 		expect(checkpoints[0].hash).toBe(commit?.commit)
 	})
