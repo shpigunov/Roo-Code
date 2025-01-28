@@ -9,27 +9,26 @@ import { CommitResult, simpleGit, SimpleGit } from "simple-git"
 import { LocalCheckpointer } from "../LocalCheckpointer"
 
 describe("LocalCheckpointer", () => {
-	let checkpointer: LocalCheckpointer
-	let tempDir: string
 	let git: SimpleGit
 	let testFile: string
 	let initialCommit: CommitResult
-	const mainBranch = "my_branch"
+	const mainBranch = "main"
 	const hiddenBranch = "checkpoints"
+	let checkpointer: LocalCheckpointer
 
 	beforeEach(async () => {
 		// Create a temporary directory for testing.
-		tempDir = path.join(os.tmpdir(), `checkpointer-test-${Date.now()}`)
-		await fs.mkdir(tempDir)
+		const workspacePath = path.join(os.tmpdir(), `checkpointer-test-${Date.now()}`)
+		await fs.mkdir(workspacePath)
 
 		// Initialize git repo.
-		git = simpleGit(tempDir)
+		git = simpleGit(workspacePath)
 		await git.init(["--initial-branch", mainBranch])
 		await git.addConfig("user.name", "Roo Code")
 		await git.addConfig("user.email", "support@roo.vet")
 
 		// Create test file.
-		testFile = path.join(tempDir, "test.txt")
+		testFile = path.join(workspacePath, "test.txt")
 		await fs.writeFile(testFile, "Hello, world!")
 
 		// Create initial commit.
@@ -37,12 +36,11 @@ describe("LocalCheckpointer", () => {
 		initialCommit = await git.commit("Initial commit")!
 
 		// Create checkpointer instance.
-		checkpointer = await LocalCheckpointer.create({ workspacePath: tempDir, mainBranch, hiddenBranch })
+		checkpointer = await LocalCheckpointer.create({ workspacePath, mainBranch, hiddenBranch })
 	})
 
 	afterEach(async () => {
-		// Clean up temporary directory.
-		await fs.rm(tempDir, { recursive: true, force: true })
+		await fs.rm(checkpointer.workspacePath, { recursive: true, force: true })
 	})
 
 	it("creates a hidden branch on initialization", async () => {
@@ -76,7 +74,6 @@ describe("LocalCheckpointer", () => {
 		const commit2 = await checkpointer.saveCheckpoint("Second checkpoint")
 		expect(commit2?.commit).toBeTruthy()
 		const details2 = await git.show([commit2!.commit])
-		console.log(details2)
 		expect(details2).toContain("-Hello, world!")
 		expect(details2).toContain("+Hola, world!")
 
@@ -91,5 +88,37 @@ describe("LocalCheckpointer", () => {
 		// Switch back to initial commit.
 		await checkpointer.restoreCheckpoint(initialCommit.commit)
 		expect(await fs.readFile(testFile, "utf-8")).toBe("Hello, world!")
+	})
+
+	it("does nothing if no changes are made since the last checkpoint", async () => {
+		await fs.writeFile(testFile, "Ahoy, world!")
+		const commit = await checkpointer.saveCheckpoint("First checkpoint")
+		expect(commit?.commit).toBeTruthy()
+
+		const commit2 = await checkpointer.saveCheckpoint("Second checkpoint")
+		expect(commit2?.commit).toBeFalsy()
+	})
+
+	it("preserves pending changes when restoring a checkpoint", async () => {
+		await fs.writeFile(testFile, "Ahoy, world!")
+		const commit1 = await checkpointer.saveCheckpoint("First checkpoint")
+		expect(commit1?.commit).toBeTruthy()
+
+		await fs.writeFile(testFile, "Hola, world!")
+		const commit2 = await checkpointer.saveCheckpoint("Second checkpoint")
+		expect(commit2?.commit).toBeTruthy()
+
+		await fs.writeFile(testFile, "Bonjour, world!")
+
+		// Restore first checkpoint - this should create a new checkpoint with
+		// the pending changes.
+		await checkpointer.restoreCheckpoint(commit1!.commit)
+
+		// Verify the pending changes were saved as a checkpoint.
+		const checkpoints = await checkpointer.listCheckpoints()
+		expect(checkpoints[0].message).toBe(`restoreCheckpoint ${commit1!.commit}`)
+
+		// Verify the content is now from checkpoint1.
+		expect(await fs.readFile(testFile, "utf-8")).toBe("Ahoy, world!")
 	})
 })

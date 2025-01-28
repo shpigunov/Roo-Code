@@ -26,6 +26,7 @@ export class LocalCheckpointer {
 		const checkpointer = new LocalCheckpointer(options)
 		await checkpointer.ensureGitInstalled()
 		await checkpointer.ensureGitRepo()
+		await checkpointer.initGitConfig()
 		await checkpointer.initHiddenBranch()
 		return checkpointer
 	}
@@ -44,18 +45,6 @@ export class LocalCheckpointer {
 		}
 
 		this.git = simpleGit(options)
-	}
-
-	/**
-	 * Initialize git configuration. Should be called after constructor.
-	 */
-	private async initGitConfig(): Promise<void> {
-		try {
-			await this.git.addConfig("user.name", "Roo Code")
-			await this.git.addConfig("user.email", "support@roo.vet")
-		} catch (err) {
-			throw new Error(`Failed to configure Git: ${err instanceof Error ? err.message : String(err)}`)
-		}
 	}
 
 	/**
@@ -82,6 +71,35 @@ export class LocalCheckpointer {
 
 		if (!isGitRepo) {
 			throw new Error(`No .git directory found at ${gitDir}. Please initialize a Git repository first.`)
+		}
+	}
+
+	/**
+	 * Initialize git configuration. Should be called after constructor.
+	 */
+	private async initGitConfig() {
+		try {
+			await this.git.addConfig("user.name", "Roo Code")
+			await this.git.addConfig("user.email", "support@roo.vet")
+		} catch (err) {
+			throw new Error(`Failed to configure Git: ${err instanceof Error ? err.message : String(err)}`)
+		}
+	}
+
+	/**
+	 * Create the hidden branch if it doesn't exist. Otherwise, do nothing.
+	 * If the branch is missing, we base it off the main branch.
+	 */
+	private async initHiddenBranch(): Promise<void> {
+		// Check if the branch already exists.
+		const branchSummary = await this.git.branch()
+
+		if (!branchSummary.all.includes(this.hiddenBranch)) {
+			// Create the new branch from main.
+			await this.git.checkoutBranch(this.hiddenBranch, this.mainBranch)
+
+			// Switch back to main.
+			await this.git.checkout(this.mainBranch)
 		}
 	}
 
@@ -146,23 +164,6 @@ export class LocalCheckpointer {
 	}
 
 	/**
-	 * Create the hidden branch if it doesn't exist. Otherwise, do nothing.
-	 * If the branch is missing, we base it off the main branch.
-	 */
-	private async initHiddenBranch(): Promise<void> {
-		// Check if the branch already exists.
-		const branchSummary = await this.git.branch()
-
-		if (!branchSummary.all.includes(this.hiddenBranch)) {
-			// Create the new branch from main.
-			await this.git.checkoutBranch(this.hiddenBranch, this.mainBranch)
-
-			// Switch back to main.
-			await this.git.checkout(this.mainBranch)
-		}
-	}
-
-	/**
 	 * List commits on the hidden branch as checkpoints.
 	 * We can parse the commit log to build an array of `Checkpoint`.
 	 */
@@ -177,7 +178,7 @@ export class LocalCheckpointer {
 	}
 
 	/**
-	 * Commit changes in the working directory (on the hidden branch) as a new checkpoint.\
+	 * Commit changes in the working directory (on the hidden branch) as a new checkpoint.
 	 * Preserves the current state of the main branch.
 	 */
 	public async saveCheckpoint(message: string) {
@@ -194,10 +195,25 @@ export class LocalCheckpointer {
 		}
 
 		try {
+			// Get the latest commit on the hidden branch before we reset it.
+			const latestHash = await this.git.revparse([this.hiddenBranch])
+
+			// Reset hidden branch to match main and apply the pending changes.
 			await this.git.checkout(this.hiddenBranch)
-			await this.git.reset(["--hard", this.mainBranch]) // Reset hidden branch to match main
-			await this.applyStash() // Apply the stashed changes
-			await this.git.add(["."]) // Stage everything
+			await this.git.reset(["--hard", this.mainBranch])
+			await this.applyStash()
+
+			// If there are no changes, we don't need to commit.
+			const diff = await this.git.diff([latestHash])
+
+			if (!diff) {
+				await this.git.checkout(this.mainBranch)
+				await this.popStash()
+				return undefined
+			}
+
+			// Otherwise, commit the changes.
+			await this.git.add(["."])
 			const commit = await this.git.commit(message)
 			await this.git.checkout(this.mainBranch)
 			await this.popStash()
@@ -222,10 +238,13 @@ export class LocalCheckpointer {
 			throw new Error(`Must be on ${this.mainBranch} branch to restore checkpoints. Currently on: ${branch}`)
 		}
 
-		// Discard any pending changes. Note that these should already be preserved
-		// as a checkpoint, but we should verify that.
-		await this.pushStash()
-		await this.dropStash()
+		// Persist pending changes in a checkpoint and then discard them.
+		const commit = await this.saveCheckpoint(`restoreCheckpoint ${commitHash}`)
+
+		if (commit) {
+			await this.pushStash()
+			await this.dropStash()
+		}
 
 		await this.git.raw(["restore", "--source", commitHash, "--worktree", "--", "."])
 	}
