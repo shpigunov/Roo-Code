@@ -46,6 +46,7 @@ export interface WebviewMessage {
 		| "soundEnabled"
 		| "soundVolume"
 		| "diffEnabled"
+		| "checkpointsEnabled"
 		| "browserViewportSize"
 		| "screenshotQuality"
 		| "openMcpSettings"

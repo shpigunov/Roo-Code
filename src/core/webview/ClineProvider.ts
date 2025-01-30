@@ -37,7 +37,7 @@ import { getUri } from "./getUri"
 import { playSound, setSoundEnabled, setSoundVolume } from "../../utils/sound"
 import { checkExistKey } from "../../shared/checkExistApiConfig"
 import { singleCompletionHandler } from "../../utils/single-completion-handler"
-import { getCommitInfo, searchCommits, getWorkingState } from "../../utils/git"
+import { searchCommits } from "../../utils/git"
 import { ConfigManager } from "../config/ConfigManager"
 import { CustomModesManager } from "../config/CustomModesManager"
 import { EXPERIMENT_IDS, experiments as Experiments, experimentDefault, ExperimentId } from "../../shared/experiments"
@@ -102,6 +102,7 @@ type GlobalStateKey =
 	| "soundEnabled"
 	| "soundVolume"
 	| "diffEnabled"
+	| "checkpointsEnabled"
 	| "browserViewportSize"
 	| "screenshotQuality"
 	| "fuzzyMatchThreshold"
@@ -337,6 +338,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			apiConfiguration,
 			customModePrompts,
 			diffEnabled,
+			checkpointsEnabled,
 			fuzzyMatchThreshold,
 			mode,
 			customInstructions: globalInstructions,
@@ -351,6 +353,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			apiConfiguration,
 			effectiveInstructions,
 			diffEnabled,
+			checkpointsEnabled,
 			fuzzyMatchThreshold,
 			task,
 			images,
@@ -365,6 +368,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			apiConfiguration,
 			customModePrompts,
 			diffEnabled,
+			checkpointsEnabled,
 			fuzzyMatchThreshold,
 			mode,
 			customInstructions: globalInstructions,
@@ -379,6 +383,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			apiConfiguration,
 			effectiveInstructions,
 			diffEnabled,
+			checkpointsEnabled,
 			fuzzyMatchThreshold,
 			undefined,
 			undefined,
@@ -789,6 +794,11 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 					case "diffEnabled":
 						const diffEnabled = message.bool ?? true
 						await this.updateGlobalState("diffEnabled", diffEnabled)
+						await this.postStateToWebview()
+						break
+					case "checkpointsEnabled":
+						const checkpointsEnabled = message.bool ?? false
+						await this.updateGlobalState("checkpointsEnabled", checkpointsEnabled)
 						await this.postStateToWebview()
 						break
 					case "browserViewportSize":
@@ -1872,6 +1882,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			alwaysAllowModeSwitch,
 			soundEnabled,
 			diffEnabled,
+			checkpointsEnabled,
 			taskHistory,
 			soundVolume,
 			browserViewportSize,
@@ -1912,6 +1923,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 				.sort((a: HistoryItem, b: HistoryItem) => b.ts - a.ts),
 			soundEnabled: soundEnabled ?? false,
 			diffEnabled: diffEnabled ?? true,
+			checkpointsEnabled: checkpointsEnabled ?? false,
 			shouldShowAnnouncement: lastShownAnnouncementId !== this.latestAnnouncementId,
 			allowedCommands,
 			soundVolume: soundVolume ?? 0.5,
@@ -2037,6 +2049,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			allowedCommands,
 			soundEnabled,
 			diffEnabled,
+			checkpointsEnabled,
 			soundVolume,
 			browserViewportSize,
 			fuzzyMatchThreshold,
@@ -2107,6 +2120,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			this.getGlobalState("allowedCommands") as Promise<string[] | undefined>,
 			this.getGlobalState("soundEnabled") as Promise<boolean | undefined>,
 			this.getGlobalState("diffEnabled") as Promise<boolean | undefined>,
+			this.getGlobalState("checkpointsEnabled") as Promise<boolean | undefined>,
 			this.getGlobalState("soundVolume") as Promise<number | undefined>,
 			this.getGlobalState("browserViewportSize") as Promise<string | undefined>,
 			this.getGlobalState("fuzzyMatchThreshold") as Promise<number | undefined>,
@@ -2196,6 +2210,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			allowedCommands,
 			soundEnabled: soundEnabled ?? false,
 			diffEnabled: diffEnabled ?? true,
+			checkpointsEnabled: checkpointsEnabled ?? false,
 			soundVolume,
 			browserViewportSize: browserViewportSize ?? "900x600",
 			screenshotQuality: screenshotQuality ?? 75,

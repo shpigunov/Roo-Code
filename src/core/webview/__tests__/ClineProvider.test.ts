@@ -314,6 +314,7 @@ describe("ClineProvider", () => {
 			uriScheme: "vscode",
 			soundEnabled: false,
 			diffEnabled: false,
+			checkpointsEnabled: false,
 			writeDelayMs: 1000,
 			browserViewportSize: "900x600",
 			fuzzyMatchThreshold: 1.0,

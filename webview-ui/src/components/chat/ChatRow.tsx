@@ -1,7 +1,9 @@
-import { VSCodeBadge, VSCodeButton, VSCodeProgressRing } from "@vscode/webview-ui-toolkit/react"
-import deepEqual from "fast-deep-equal"
 import React, { memo, useEffect, useMemo, useRef, useState } from "react"
 import { useSize } from "react-use"
+import deepEqual from "fast-deep-equal"
+import styled from "styled-components"
+import { VSCodeBadge, VSCodeButton, VSCodeProgressRing } from "@vscode/webview-ui-toolkit/react"
+
 import {
 	ClineApiReqInfo,
 	ClineAskUseMcpServer,
@@ -20,6 +22,7 @@ import Thumbnails from "../common/Thumbnails"
 import McpResourceRow from "../mcp/McpResourceRow"
 import McpToolRow from "../mcp/McpToolRow"
 import { highlightMentions } from "./TaskHeader"
+import { CheckpointOverlay, CheckpointControls } from "./checkpoints"
 
 interface ChatRowProps {
 	message: ClineMessage
@@ -35,18 +38,32 @@ interface ChatRowContentProps extends Omit<ChatRowProps, "onHeightChange"> {}
 
 const ChatRow = memo(
 	(props: ChatRowProps) => {
-		const { isLast, onHeightChange, message } = props
-		// Store the previous height to compare with the current height
-		// This allows us to detect changes without causing re-renders
+		const { isLast, onHeightChange, message, lastModifiedMessage } = props
+		// Store the previous height to compare with the current height.
+		// This allows us to detect changes without causing re-renders.
 		const prevHeightRef = useRef(0)
 
+		// NOTE: for tools that are interrupted and not responded to (approved or rejected),
+		// there won't be a checkpoint hash.
+		let shouldShowCheckpoints =
+			message.checkpointHash != null &&
+			(message.say === "tool" ||
+				message.ask === "tool" ||
+				message.say === "command" ||
+				message.ask === "command" ||
+				message.say === "completion_result" ||
+				message.ask === "completion_result")
+
+		if (shouldShowCheckpoints && isLast) {
+			shouldShowCheckpoints =
+				lastModifiedMessage?.ask === "resume_completed_task" || lastModifiedMessage?.ask === "resume_task"
+		}
+
 		const [chatrow, { height }] = useSize(
-			<div
-				style={{
-					padding: "10px 6px 10px 15px",
-				}}>
+			<ChatRowContainer>
 				<ChatRowContent {...props} />
-			</div>,
+				<CheckpointOverlay messageTs={message.ts} />
+			</ChatRowContainer>,
 		)
 
 		useEffect(() => {
@@ -1023,3 +1040,12 @@ const Markdown = memo(({ markdown, partial }: { markdown?: string; partial?: boo
 		</div>
 	)
 })
+
+const ChatRowContainer = styled.div`
+	padding: 10px 6px 10px 15px;
+	position: relative;
+
+	&:hover ${CheckpointControls} {
+		opacity: 1;
+	}
+`

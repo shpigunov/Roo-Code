@@ -1,6 +1,6 @@
 import { Anthropic } from "@anthropic-ai/sdk"
 import cloneDeep from "clone-deep"
-import { DiffStrategy, getDiffStrategy, UnifiedDiffStrategy } from "./diff/DiffStrategy"
+import { DiffStrategy, getDiffStrategy } from "./diff/DiffStrategy"
 import { validateToolUse, isToolAllowedForMode, ToolName } from "./mode-validator"
 import delay from "delay"
 import fs from "fs/promises"
@@ -9,9 +9,10 @@ import pWaitFor from "p-wait-for"
 import * as path from "path"
 import { serializeError } from "serialize-error"
 import * as vscode from "vscode"
-import { ApiHandler, SingleCompletionHandler, buildApiHandler } from "../api"
+import { ApiHandler, buildApiHandler } from "../api"
 import { ApiStream } from "../api/transform/stream"
 import { DiffViewProvider } from "../integrations/editor/DiffViewProvider"
+import { LocalCheckpointer } from "../integrations/checkpoints/LocalCheckpointer"
 import { findToolName, formatContentBlockToMarkdown } from "../integrations/misc/export-markdown"
 import {
 	extractTextFromFile,
@@ -52,12 +53,11 @@ import { parseMentions } from "./mentions"
 import { AssistantMessageContent, parseAssistantMessage, ToolParamName, ToolUseName } from "./assistant-message"
 import { formatResponse } from "./prompts/responses"
 import { SYSTEM_PROMPT } from "./prompts/system"
-import { modes, defaultModeSlug, getModeBySlug } from "../shared/modes"
+import { defaultModeSlug, getModeBySlug } from "../shared/modes"
 import { truncateHalfConversation } from "./sliding-window"
 import { ClineProvider, GlobalFileNames } from "./webview/ClineProvider"
 import { detectCodeOmission } from "../integrations/editor/detect-omission"
 import { BrowserSession } from "../services/browser/BrowserSession"
-import { OpenRouterHandler } from "../api/providers/openrouter"
 import { McpHub } from "../services/mcp/McpHub"
 import crypto from "crypto"
 import { insertGroups } from "./diff/insert-groups"
@@ -96,6 +96,8 @@ export class Cline {
 	didFinishAborting = false
 	abandoned = false
 	private diffViewProvider: DiffViewProvider
+	checkpointsEnabled: boolean = false
+	private checkpointer?: LocalCheckpointer
 
 	// streaming
 	private currentStreamingContentIndex = 0
@@ -113,6 +115,7 @@ export class Cline {
 		apiConfiguration: ApiConfiguration,
 		customInstructions?: string,
 		enableDiff?: boolean,
+		enableCheckpoints?: boolean,
 		fuzzyMatchThreshold?: number,
 		task?: string | undefined,
 		images?: string[] | undefined,
@@ -133,6 +136,8 @@ export class Cline {
 		this.fuzzyMatchThreshold = fuzzyMatchThreshold ?? 1.0
 		this.providerRef = new WeakRef(provider)
 		this.diffViewProvider = new DiffViewProvider(cwd)
+		this.checkpointsEnabled = enableCheckpoints ?? false
+		this.checkpointer = undefined
 
 		if (historyItem) {
 			this.taskId = historyItem.id
@@ -257,13 +262,20 @@ export class Cline {
 
 	// Communicate with webview
 
-	// partial has three valid states true (partial message), false (completion of partial message), undefined (individual complete message)
+	// partial has three valid states
+	// true (partial message),
+	// false (completion of partial message),
+	// undefined (individual complete message)
 	async ask(
 		type: ClineAsk,
 		text?: string,
 		partial?: boolean,
 	): Promise<{ response: ClineAskResponse; text?: string; images?: string[] }> {
-		// If this Cline instance was aborted by the provider, then the only thing keeping us alive is a promise still running in the background, in which case we don't want to send its result to the webview as it is attached to a new instance of Cline now. So we can safely ignore the result of any active promises, and this class will be deallocated. (Although we set Cline = undefined in provider, that simply removes the reference to this instance, but the instance is still alive until this promise resolves or rejects.)
+		// If this Cline instance was aborted by the provider, then the only thing keeping us alive is a promise
+		// still running in the background, in which case we don't want to send its result to the webview as it is
+		// attached to a new instance of Cline now. So we can safely ignore the result of any active promises, an
+		// this class will be deallocated. (Although we set Cline = undefined in provider, that simply removes the
+		// reference to this instance, but the instance is still alive until this promise resolves or rejects.)
 		if (this.abort) {
 			throw new Error("Roo Code instance aborted")
 		}
@@ -812,7 +824,9 @@ export class Cline {
 
 		const { browserViewportSize, mode, customModePrompts, preferredLanguage, experiments } =
 			(await this.providerRef.deref()?.getState()) ?? {}
+
 		const { customModes } = (await this.providerRef.deref()?.getState()) ?? {}
+
 		const systemPrompt = await (async () => {
 			const provider = this.providerRef.deref()
 			if (!provider) {
@@ -884,7 +898,10 @@ export class Cline {
 			const firstChunk = await iterator.next()
 			yield firstChunk.value
 		} catch (error) {
-			// note that this api_req_failed ask is unique in that we only present this option if the api hasn't streamed any content yet (ie it fails on the first chunk due), as it would allow them to hit a retry button. However if the api failed mid-stream, it could be in any arbitrary state where some tools may have executed, so that error is handled differently and requires cancelling the task entirely.
+			// note that this api_req_failed ask is unique in that we only present this option if the api hasn't
+			// streamed any content yet (ie it fails on the first chunk due), as it would allow them to hit a retry
+			// button. However if the api failed mid-stream, it could be in any arbitrary state where some tools may
+			// have executed, so that error is handled differently and requires cancelling the task entirely.
 			if (alwaysApproveResubmit) {
 				const errorMsg = error.message ?? "Unknown error"
 				const requestDelay = requestDelaySeconds || 5
@@ -920,8 +937,10 @@ export class Cline {
 		}
 
 		// no error, so we can continue to yield all remaining chunks
-		// (needs to be placed outside of try/catch since it we want caller to handle errors not with api_req_failed as that is reserved for first chunk failures only)
-		// this delegates to another generator or iterable object. In this case, it's saying "yield all remaining values from this iterator". This effectively passes along all subsequent chunks from the original stream.
+		// (needs to be placed outside of try/catch since it we want caller to handle errors not with api_req_failed
+		// as that is reserved for first chunk failures only)
+		// this delegates to another generator or iterable object. In this case, it's saying "yield all remaining values
+		// from this iterator". This effectively passes along all subsequent chunks from the original stream.
 		yield* iterator
 	}
 
@@ -934,6 +953,7 @@ export class Cline {
 			this.presentAssistantMessageHasPendingUpdates = true
 			return
 		}
+
 		this.presentAssistantMessageLocked = true
 		this.presentAssistantMessageHasPendingUpdates = false
 
@@ -945,10 +965,12 @@ export class Cline {
 			// console.log("no more content blocks to stream! this shouldn't happen?")
 			this.presentAssistantMessageLocked = false
 			return
-			//throw new Error("No more content blocks to stream! This shouldn't happen...") // remove and just return after testing
+			// remove and just return after testing
+			// throw new Error("No more content blocks to stream! This shouldn't happen...")
 		}
 
 		const block = cloneDeep(this.assistantMessageContent[this.currentStreamingContentIndex]) // need to create copy bc while stream is updating the array, it could be updating the reference block properties too
+
 		switch (block.type) {
 			case "text": {
 				if (this.didRejectTool || this.didAlreadyUseTool) {
@@ -1072,7 +1094,7 @@ export class Cline {
 					} else {
 						this.userMessageContent.push(...content)
 					}
-					// once a tool result has been collected, ignore all other tool uses since we should only ever present one tool result per message
+					// once a tool result has been collected, ignore all other tool uses since we should only everpresent one tool result per message
 					this.didAlreadyUseTool = true
 				}
 
@@ -1152,6 +1174,7 @@ export class Cline {
 
 				// Validate tool use before execution
 				const { mode, customModes } = (await this.providerRef.deref()?.getState()) ?? {}
+
 				try {
 					validateToolUse(
 						block.name as ToolName,
@@ -1360,6 +1383,7 @@ export class Cline {
 							break
 						}
 					}
+
 					case "apply_diff": {
 						const relPath: string | undefined = block.params.path
 						const diffContent: string | undefined = block.params.diff
@@ -1842,6 +1866,7 @@ export class Cline {
 							break
 						}
 					}
+
 					case "list_files": {
 						const relDirPath: string | undefined = block.params.path
 						const recursiveRaw: string | undefined = block.params.recursive
@@ -1884,6 +1909,7 @@ export class Cline {
 							break
 						}
 					}
+
 					case "list_code_definition_names": {
 						const relDirPath: string | undefined = block.params.path
 						const sharedMessageProps: ClineSayTool = {
@@ -1925,6 +1951,7 @@ export class Cline {
 							break
 						}
 					}
+
 					case "search_files": {
 						const relDirPath: string | undefined = block.params.path
 						const regex: string | undefined = block.params.regex
@@ -1973,6 +2000,7 @@ export class Cline {
 							break
 						}
 					}
+
 					case "browser_action": {
 						const action: BrowserAction | undefined = block.params.action as BrowserAction
 						const url: string | undefined = block.params.url
@@ -2119,6 +2147,7 @@ export class Cline {
 							break
 						}
 					}
+
 					case "execute_command": {
 						const command: string | undefined = block.params.command
 						try {
@@ -2153,6 +2182,7 @@ export class Cline {
 							break
 						}
 					}
+
 					case "use_mcp_tool": {
 						const server_name: string | undefined = block.params.server_name
 						const tool_name: string | undefined = block.params.tool_name
@@ -2248,6 +2278,7 @@ export class Cline {
 							break
 						}
 					}
+
 					case "access_mcp_resource": {
 						const server_name: string | undefined = block.params.server_name
 						const uri: string | undefined = block.params.uri
@@ -2309,6 +2340,7 @@ export class Cline {
 							break
 						}
 					}
+
 					case "ask_followup_question": {
 						const question: string | undefined = block.params.question
 						try {
@@ -2336,6 +2368,7 @@ export class Cline {
 							break
 						}
 					}
+
 					case "switch_mode": {
 						const mode_slug: string | undefined = block.params.mode_slug
 						const reason: string | undefined = block.params.reason
@@ -2536,6 +2569,7 @@ export class Cline {
 						}
 					}
 				}
+
 				break
 		}
 
@@ -2544,6 +2578,7 @@ export class Cline {
 		When you see the UI inactive during this, it means that a tool is breaking without presenting any UI. For example the write_to_file tool was breaking when relpath was undefined, and for invalid relpath it never presented UI.
 		*/
 		this.presentAssistantMessageLocked = false // this needs to be placed here, if not then calling this.presentAssistantMessage below would fail (sometimes) since it's locked
+
 		// NOTE: when tool is rejected, iterator stream is interrupted and it waits for userMessageContentReady to be true. Future calls to present will skip execution since didRejectTool and iterate until contentIndex is set to message length and it sets userMessageContentReady to true itself (instead of preemptively doing it in iterator)
 		if (!block.partial || this.didRejectTool || this.didAlreadyUseTool) {
 			// block is finished streaming and executing
@@ -2602,7 +2637,8 @@ export class Cline {
 		// get previous api req's index to check token usage and determine if we need to truncate conversation history
 		const previousApiReqIndex = findLastIndex(this.clineMessages, (m) => m.say === "api_req_started")
 
-		// getting verbose details is an expensive operation, it uses globby to top-down build file structure of project which for large projects can take a few seconds
+		// getting verbose details is an expensive operation, it uses globby to top-down build file structure of project
+		// which for large projects can take a few seconds
 		// for the best UX we show a placeholder api_req_started message with a loading spinner as this happens
 		await this.say(
 			"api_req_started",
@@ -2619,7 +2655,8 @@ export class Cline {
 
 		await this.addToApiConversationHistory({ role: "user", content: userContent })
 
-		// since we sent off a placeholder api_req_started message to update the webview while waiting to actually start the API request (to load potential details for example), we need to update the text of that message
+		// since we sent off a placeholder api_req_started message to update the webview while waiting to actually start
+		// the API request (to load potential details for example), we need to update the text of that message
 		const lastApiReqIndex = findLastIndex(this.clineMessages, (m) => m.say === "api_req_started")
 		this.clineMessages[lastApiReqIndex].text = JSON.stringify({
 			request: userContent.map((block) => formatContentBlockToMarkdown(block)).join("\n\n"),
@@ -2634,9 +2671,10 @@ export class Cline {
 			let outputTokens = 0
 			let totalCost: number | undefined
 
-			// update api_req_started. we can't use api_req_finished anymore since it's a unique case where it could come after a streaming message (ie in the middle of being updated or executed)
-			// fortunately api_req_finished was always parsed out for the gui anyways, so it remains solely for legacy purposes to keep track of prices in tasks from history
-			// (it's worth removing a few months from now)
+			// update api_req_started. we can't use api_req_finished anymore since it's a unique case where it could
+			// come after a streaming message (ie in the middle of being updated or executed)
+			// fortunately api_req_finished was always parsed out for the gui anyways, so it remains solely for legacy
+			// purposes to keep track of prices in tasks from history (it's worth removing a few months from now)
 			const updateApiReqMsg = (cancelReason?: ClineApiReqCancelReason, streamingFailedMessage?: string) => {
 				this.clineMessages[lastApiReqIndex].text = JSON.stringify({
 					...JSON.parse(this.clineMessages[lastApiReqIndex].text || "{}"),
@@ -2710,7 +2748,9 @@ export class Cline {
 			this.presentAssistantMessageHasPendingUpdates = false
 			await this.diffViewProvider.reset()
 
-			const stream = this.attemptApiRequest(previousApiReqIndex) // yields only if the first chunk is successful, otherwise will allow the user to retry the request (most likely due to rate limit error, which gets thrown on the first chunk)
+			// yields only if the first chunk is successful, otherwise will allow the user to retry the request (most
+			// likely due to rate limit error, which gets thrown on the first chunk)
+			const stream = this.attemptApiRequest(previousApiReqIndex)
 			let assistantMessage = ""
 			let reasoningMessage = ""
 			try {

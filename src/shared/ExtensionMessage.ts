@@ -99,6 +99,7 @@ export interface ExtensionState {
 	soundEnabled?: boolean
 	soundVolume?: number
 	diffEnabled?: boolean
+	checkpointsEnabled: boolean
 	browserViewportSize?: string
 	screenshotQuality?: number
 	fuzzyMatchThreshold?: number
@@ -124,6 +125,7 @@ export interface ClineMessage {
 	images?: string[]
 	partial?: boolean
 	reasoning?: string
+	checkpointHash?: string
 }
 
 export type ClineAsk =
